@@ -123,6 +123,11 @@ Adv::writePlotFile (const std::string& dir,
         os << level << ' ' << grids.size() << ' ' << cur_time << '\n';
         os << parent->levelSteps(level) << '\n';
 
+        int myRank;
+        MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
+        std::cerr << myRank << " at level " << level << " has numgrids " << grids.size() << "-------------------\n";
+
+
         for (i = 0; i < grids.size(); ++i)
         {
             RealBox gridloc = RealBox(grids[i],geom.CellSize(),geom.ProbLo());

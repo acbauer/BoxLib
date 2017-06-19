@@ -50,6 +50,20 @@
 #ifdef BL_USE_ARRAYVIEW
 #include <DatasetClient.H>
 #endif
+
+#ifdef BL_USE_CATALYST
+#include <vtkCommunicator.h>
+#include <vtkCPDataDescription.h>
+#include <vtkCPInputDataDescription.h>
+#include <vtkCPProcessor.h>
+#include <vtkCPPythonScriptPipeline.h>
+#include <vtkImageData.h>
+#include <vtkMultiBlockDataSet.h>
+#include <vtkMultiProcessController.h>
+#include <vtkNew.h>
+#include <vector>
+#endif
+
 //
 // This MUST be defined if don't have pubsetbuf() in I/O Streams Library.
 //
@@ -94,7 +108,9 @@ namespace
     bool prereadFAHeaders;
     VisMF::Header::Version plot_headerversion(VisMF::Header::Version_v1);
     VisMF::Header::Version checkpoint_headerversion(VisMF::Header::Version_v1);
-
+#ifdef BL_USE_CATALYST
+    std::list<std::string> catalyst_scripts;
+#endif
 }
 
 void
@@ -124,6 +140,9 @@ Amr::Initialize ()
 
     BoxLib::ExecOnFinalize(Amr::Finalize);
 
+#ifdef BL_USE_CATALYST
+    catalyst_scripts.push_back("/data/acbauer/Code/ParaView/ParaView/Examples/Catalyst/SampleScripts/gridwriter.py");
+#endif
     initialized = true;
 }
 
@@ -197,6 +216,9 @@ Amr::Amr ()
     AmrCore(),
     amr_level(PArrayManage),
     datalog(PArrayManage)
+#ifdef BL_USE_CATALYST
+    , catalyst(NULL)
+#endif
 {
     Initialize();
     InitAmr();
@@ -207,6 +229,9 @@ Amr::Amr (const RealBox* rb, int max_level_in, const Array<int>& n_cell_in, int 
     AmrCore(rb,max_level_in,n_cell_in,coord),
     amr_level(PArrayManage),
     datalog(PArrayManage)
+#ifdef BL_USE_CATALYST
+    , catalyst(NULL)
+#endif
 {
     Initialize();
     InitAmr();
@@ -462,6 +487,9 @@ Amr::InitAmr ()
     rebalance_grids = 0;
     pp.query("rebalance_grids", rebalance_grids);
 
+#ifdef BL_USE_CATALYST
+    // ACB fill in catalyst_scripts...
+#endif
 }
 
 bool
@@ -594,6 +622,13 @@ Amr::deleteDerivePlotVar (const std::string& name)
 
 Amr::~Amr ()
 {
+#ifdef BL_USE_CATALYST
+  if (catalyst) {
+    catalyst->Finalize();
+    catalyst->Delete();
+    catalyst = NULL;
+  }
+#endif
     levelbld->variableCleanUp();
 
     Amr::Finalize();
@@ -1043,6 +1078,22 @@ Amr::init (Real strt_time,
 	probDomain[i] = Geom(i).Domain();
     }
     BL_COMM_PROFILE_INITAMR(finest_level, max_level, ref_ratio, probDomain);
+#endif
+
+#ifdef BL_USE_CATALYST
+    if (!catalyst_scripts.empty()) {
+      catalyst = vtkCPProcessor::New();
+      catalyst->Initialize();
+      for (std::list<std::string>::iterator it=catalyst_scripts.begin();
+           it!=catalyst_scripts.end();it++)
+      {
+        vtkNew<vtkCPPythonScriptPipeline> pipeline;
+        pipeline->Initialize(it->c_str());
+        catalyst->AddPipeline(pipeline.GetPointer());
+        std::cerr << "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP made scripts\n";
+      }
+      std::cerr << "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP made scripts 00000000000000000\n";
+    }
 #endif
     BL_PROFILE_REGION_STOP("Amr::init()");
 }
@@ -2146,6 +2197,11 @@ Amr::coarseTimeStep (Real stop_time)
         writeSmallPlotFile();
     }
 
+#ifdef BL_USE_CATALYST
+    std::cerr << "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n";
+    computeInSitu();
+#endif
+
     bUserStopRequest = to_stop;
     if (to_stop)
     {
@@ -3112,6 +3168,86 @@ Amr::RedistributeParticles ()
 }
 #endif
 
+#ifdef BL_USE_CATALYST
+void
+Amr::computeInSitu()
+{
+  if (catalyst) {
+    vtkNew<vtkCPDataDescription> dataDescription;
+    dataDescription->AddInput("input");
+    vtkIdType dd = levelSteps(0);
+    double time = cumtime;
+    dataDescription->SetTimeData(time, dd);
+    if (catalyst->RequestDataDescription(dataDescription.GetPointer())) {
+      std::cerr << "Amr.cpp::computeInSitu() ...........................................\n";
+      // make grid
+      MultiFab& mfab = amr_level[0].get_new_data(0); // acbauer check on get_new_data(0) arg
+      vtkMultiProcessController* controller = vtkMultiProcessController::GetGlobalController();
+      int myRank = controller->GetLocalProcessId();
+      int numProcs = controller->GetNumberOfProcesses();
+      std::vector<vtkIdType> numBlocks(numProcs*(finest_level+1)*2, 0);
+      for (int k(0); k <= finest_level; ++k) {
+        MultiFab& mfab = amr_level[k].get_new_data(0); // acbauer check on get_new_data(0) arg
+        int counter = 0;
+        for (MFIter mfi(mfab); mfi.isValid(); ++mfi)
+        {
+          counter++;
+        }
+        numBlocks[myRank*(finest_level+1)+k] = counter;
+      }
+      // can do a scan here
+      controller->AllReduce(&numBlocks[0], &numBlocks[numProcs*(finest_level+1)], numProcs*(finest_level+1), vtkCommunicator::MAX_OP);
+      vtkNew<vtkMultiBlockDataSet> grid;
+      grid->SetNumberOfBlocks(finest_level+1);
+      for (int level=0; level <= finest_level; ++level) {
+        vtkNew<vtkMultiBlockDataSet> levelGrid;
+        grid->SetBlock(level, levelGrid.GetPointer());
+        levelGrid->SetNumberOfBlocks(amr_level[level].boxArray().size());
+        MultiFab& mfab = amr_level[level].get_new_data(0); // acbauer check on get_new_data(0) arg
+        double spacing[6] = {1./std::pow(2, level+1), 1./std::pow(2, level+1), 1./std::pow(2, level+1)}; // acbauer -- this could be pow(4,level+1) instead of 2 depending on refinement ratio
+        int startBlock = 0;
+        for (int i=0;i<myRank;i++) {
+          int startBlock = numBlocks[i+numProcs*(finest_level+1)];
+        }
+        int counter = 0;
+        for (MFIter mfi(mfab); mfi.isValid(); ++mfi)
+        {
+          std::cerr << "============================ Amr::computeInSitu() counter " << counter << " index " << mfi.index() << std::endl;
+          vtkNew<vtkImageData> imageData;
+          levelGrid->SetBlock(startBlock+counter, imageData.GetPointer()); // acbauer possibly use mfi.index() instead of counter
+          counter++;
+          imageData->SetSpacing(spacing);
+          imageData->SetOrigin(0, 0, 0); // acbauer get the origin too...
+          // BoxLib extents are with respect to cells and VTK extens are with respect to points
+          imageData->SetExtent(mfi.validbox().smallEnd(0), mfi.validbox().bigEnd(0)+1,
+                               mfi.validbox().smallEnd(1), mfi.validbox().bigEnd(1)+1,
+                               mfi.validbox().smallEnd(2), mfi.validbox().bigEnd(2)+1);
+          //Box data_box = mfi.fabbox();
+
+        // GlobalDataAdaptor->SetValidBlockExtent(mfi.index(),
+        //                                        mfi.validbox().smallEnd(0), mfi.validbox().bigEnd(0),
+        //                                        mfi.validbox().smallEnd(1), mfi.validbox().bigEnd(1),
+        //                                        mfi.validbox().smallEnd(2), mfi.validbox().bigEnd(2));
+
+        // GlobalDataAdaptor->SetBlockData(mfi.index(), simulation_data[mfi].dataPtr(0));
+
+        // //std::cout << "Box " << mfi.index() << " overall min: " << simulation_data[mfi].min(0) << " valid box min: " << simulation_data[mfi].min(mfi.validbox(),0);
+        // //std::cout << " overall max: " << simulation_data[mfi].max(0) << " valid box max: " << simulation_data[mfi].max(mfi.validbox(),0) << std::endl;;
+
+        // GlobalDataAdaptor->SetBlockExtent(mfi.index(),
+        //                                   data_box.smallEnd(0), data_box.bigEnd(0),
+        //                                   data_box.smallEnd(1), data_box.bigEnd(1),
+        //                                   data_box.smallEnd(2), data_box.bigEnd(2));
+        } // end MFIter loop
+      } // end level loop
+
+      vtkCPInputDataDescription* inputDataDescription = dataDescription->GetInputDescriptionByName("input");
+      inputDataDescription->SetGrid(grid.GetPointer());
+      catalyst->CoProcess(dataDescription.GetPointer());
+    }
+  }
+}
+#endif
 
 void
 Amr::AddProcsToSidecar(int nSidecarProcs, int prevSidecarProcs)

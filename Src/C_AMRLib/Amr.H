@@ -17,6 +17,10 @@
 #include <StationData.H>
 #endif
 
+#ifdef BL_USE_CATALYST
+class vtkCPProcessor;
+#endif
+
 class AmrLevel;
 class LevelBld;
 class BoxDomain;
@@ -404,6 +408,13 @@ public:
     void RedistributeParticles ();
 #endif
 
+#ifdef BL_USE_CATALYST
+    //
+    // Redistribute particles
+    //
+    void computeInSitu ();
+#endif
+
     void AddProcsToSidecar(int nSidecarProcs, int prevSidecarProcs);
     void AddProcsToComp(int nSidecarProcs, int prevSidecarProcs);
     void RedistributeGrids(int how);
@@ -561,6 +572,10 @@ protected:
     static Array<BoxArray> initial_ba;
     // Array of BoxArrays read in to externally define grid hierarchy at each regrid
     static Array<BoxArray> regrid_ba;
+
+#ifdef BL_USE_CATALYST
+  vtkCPProcessor* catalyst;
+#endif
 
 public:
 

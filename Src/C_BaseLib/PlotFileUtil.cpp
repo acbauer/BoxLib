@@ -1,6 +1,7 @@
 
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 
 #include <VisMF.H>
 #include <PlotFileUtil.H>
@@ -74,7 +75,7 @@ BoxLib::WriteGenericPlotfileHeader (std::ostream &HeaderFile,
 				    const std::string &mfPrefix)
 {
         BL_PROFILE("WriteGenericPlotfileHeader()");
-
+        std::cerr << "============PlotFileUtil.cpp -- BoxLib::WriteGenericPlotfileHeader\n";
         BL_ASSERT(nlevels <= bArray.size());
         BL_ASSERT(nlevels <= geom.size());
         BL_ASSERT(nlevels <= ref_ratio.size()+1);

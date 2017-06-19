@@ -74,6 +74,10 @@ main (int   argc,
         amrptr->writePlotFile();
     }
 
+#ifdef BL_USE_CATALYST
+    std::cerr << "????????????????????? computing in situ\n";
+    amrptr->computeInSitu();
+#endif
     delete amrptr;
 
     Real dRunTime2 = ParallelDescriptor::second() - dRunTime1;

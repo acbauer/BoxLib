@@ -11,6 +11,17 @@ include(TestManager)
 # through these variables.
 project(CAMRLIB)
 
+set(USE_CATALYST OFF CACHE BOOL "Link with Catalyst")
+if(USE_CATALYST)
+  find_package(ParaView 4.1 REQUIRED COMPONENTS vtkPVPythonCatalyst)
+  include("${PARAVIEW_USE_FILE}")
+  set(CATALYST_LIBS vtkPVPythonCatalyst vtkParallelMPI)
+  add_definitions("-DBL_USE_CATALYST")
+  if(NOT PARAVIEW_USE_MPI)
+    message(SEND_ERROR "ParaView must be built with MPI enabled")
+  endif()
+endif()
+
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CBOXLIB_INCLUDE_DIRS})
 
@@ -35,9 +46,11 @@ preprocess_boxlib_fortran(FPP_out_files ${FPP_source_files})
 
 set(local_source_files ${FPP_out_files} ${F77_source_files} ${F90_source_files} ${CXX_source_files})
 set(local_header_files ${CXX_header_files} ${F77_header_files} ${FPP_header_files} ${F90_header_files})
-add_library(box_camr OBJECT ${local_source_files})
+add_library(box_camr OBJECT ${local_source_files} ${CATALYST_LIBRARIES})
 
 add_install_include_file(${local_header_files})
+
+
 
 if (BUILD_TESTS)
 
