@@ -52,15 +52,19 @@
 #endif
 
 #ifdef BL_USE_CATALYST
+#include <vtkCellData.h>
 #include <vtkCommunicator.h>
 #include <vtkCPDataDescription.h>
 #include <vtkCPInputDataDescription.h>
 #include <vtkCPProcessor.h>
 #include <vtkCPPythonScriptPipeline.h>
+#include <vtkDoubleArray.h>
 #include <vtkImageData.h>
 #include <vtkMultiBlockDataSet.h>
 #include <vtkMultiProcessController.h>
 #include <vtkNew.h>
+#include <vtkUniformGrid.h>
+#include <vtkUnsignedCharArray.h>
 #include <vector>
 #endif
 
@@ -141,7 +145,7 @@ Amr::Initialize ()
     BoxLib::ExecOnFinalize(Amr::Finalize);
 
 #ifdef BL_USE_CATALYST
-    catalyst_scripts.push_back("/data/acbauer/Code/ParaView/ParaView/Examples/Catalyst/SampleScripts/gridwriter.py");
+    catalyst_scripts.push_back("/data/acbauer/Code/BoxLib/BoxLib/Tutorials/AMR_Adv_C/Exec/SingleVortex/gridwriter.py");
 #endif
     initialized = true;
 }
@@ -1090,9 +1094,7 @@ Amr::init (Real strt_time,
         vtkNew<vtkCPPythonScriptPipeline> pipeline;
         pipeline->Initialize(it->c_str());
         catalyst->AddPipeline(pipeline.GetPointer());
-        std::cerr << "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP made scripts\n";
       }
-      std::cerr << "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP made scripts 00000000000000000\n";
     }
 #endif
     BL_PROFILE_REGION_STOP("Amr::init()");
@@ -2198,7 +2200,6 @@ Amr::coarseTimeStep (Real stop_time)
     }
 
 #ifdef BL_USE_CATALYST
-    std::cerr << "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n";
     computeInSitu();
 #endif
 
@@ -3181,7 +3182,7 @@ Amr::computeInSitu()
     if (catalyst->RequestDataDescription(dataDescription.GetPointer())) {
       std::cerr << "Amr.cpp::computeInSitu() ...........................................\n";
       // make grid
-      MultiFab& mfab = amr_level[0].get_new_data(0); // acbauer check on get_new_data(0) arg
+      //MultiFab& mfab = amr_level[0].get_new_data(0); // acbauer check on get_new_data(0) arg
       vtkMultiProcessController* controller = vtkMultiProcessController::GetGlobalController();
       int myRank = controller->GetLocalProcessId();
       int numProcs = controller->GetNumberOfProcesses();
@@ -3199,31 +3200,68 @@ Amr::computeInSitu()
       controller->AllReduce(&numBlocks[0], &numBlocks[numProcs*(finest_level+1)], numProcs*(finest_level+1), vtkCommunicator::MAX_OP);
       vtkNew<vtkMultiBlockDataSet> grid;
       grid->SetNumberOfBlocks(finest_level+1);
+
+      // compute global bounding box
+      const Box& domain = this->getLevel(0).Domain();
+      const RealBox& probDomain = this->Geom(0).ProbDomain();
+      std::cerr << "PPPPPPPPPPPPPPPPPPPPPPP prob domain " << probDomain << " domain " << domain << std::endl;
+      double coarseSpacing[3] = {0, 0, 0};
+      for (int i=0;i<BL_SPACEDIM;i++) {
+        coarseSpacing[i] = (probDomain.hi(i) - probDomain.lo(i)) / (domain.bigEnd(i) - domain.smallEnd(i) + 1);
+      }
       for (int level=0; level <= finest_level; ++level) {
         vtkNew<vtkMultiBlockDataSet> levelGrid;
-        grid->SetBlock(level, levelGrid.GetPointer());
-        levelGrid->SetNumberOfBlocks(amr_level[level].boxArray().size());
-        MultiFab& mfab = amr_level[level].get_new_data(0); // acbauer check on get_new_data(0) arg
-        double spacing[6] = {1./std::pow(2, level+1), 1./std::pow(2, level+1), 1./std::pow(2, level+1)}; // acbauer -- this could be pow(4,level+1) instead of 2 depending on refinement ratio
-        int startBlock = 0;
-        for (int i=0;i<myRank;i++) {
-          int startBlock = numBlocks[i+numProcs*(finest_level+1)];
+        int startBlockAtLevel = 0, totalBlocksAtLevel = 0;
+        for (int i=0;i<numProcs;i++) {
+          totalBlocksAtLevel += numBlocks[level+(i+numProcs)*(finest_level+1)];
+          if (i < myRank) {
+            startBlockAtLevel += numBlocks[level+(i+numProcs)*(finest_level+1)];
+          }
         }
-        int counter = 0;
+        std::cerr << myRank << " at level " << level << " has totalBlocksAtLevel " << totalBlocksAtLevel << " and start block " << startBlockAtLevel << std::endl;
+        grid->SetBlock(level, levelGrid.GetPointer());
+        levelGrid->SetNumberOfBlocks(totalBlocksAtLevel);
+        MultiFab& mfab = amr_level[level].get_new_data(0); // acbauer check on get_new_data(0) arg
+        double spacing[3] = {coarseSpacing[0]/std::pow(2, level),
+                             coarseSpacing[1]/std::pow(2, level),
+                             coarseSpacing[2]/std::pow(2, level)}; // acbauer -- this could be pow(4,level+1) instead of 2 depending on refinement ratio
         for (MFIter mfi(mfab); mfi.isValid(); ++mfi)
         {
-          std::cerr << "============================ Amr::computeInSitu() counter " << counter << " index " << mfi.index() << std::endl;
-          vtkNew<vtkImageData> imageData;
-          levelGrid->SetBlock(startBlock+counter, imageData.GetPointer()); // acbauer possibly use mfi.index() instead of counter
-          counter++;
-          imageData->SetSpacing(spacing);
-          imageData->SetOrigin(0, 0, 0); // acbauer get the origin too...
-          // BoxLib extents are with respect to cells and VTK extens are with respect to points
-          imageData->SetExtent(mfi.validbox().smallEnd(0), mfi.validbox().bigEnd(0)+1,
-                               mfi.validbox().smallEnd(1), mfi.validbox().bigEnd(1)+1,
-                               mfi.validbox().smallEnd(2), mfi.validbox().bigEnd(2)+1);
-          //Box data_box = mfi.fabbox();
+          std::cerr << "============================ Amr::computeInSitu() level " << level << " index " << mfi.index() << std::endl;
+          vtkNew<vtkUniformGrid> uniformGrid;
 
+          levelGrid->SetBlock(mfi.index(), uniformGrid.GetPointer());
+          uniformGrid->SetSpacing(spacing);
+          uniformGrid->SetOrigin(0, 0, 0); // acbauer get the origin too...
+          // BoxLib extents are with respect to cells and VTK extens are with respect to points
+          // uniformGrid->SetExtent(mfi.validbox().smallEnd(0), mfi.validbox().bigEnd(0)+1,
+          //                        mfi.validbox().smallEnd(1), mfi.validbox().bigEnd(1)+1,
+          //                        mfi.validbox().smallEnd(2), mfi.validbox().bigEnd(2)+1);
+          uniformGrid->SetExtent(mfi.fabbox().smallEnd(0), mfi.fabbox().bigEnd(0)+1,
+                                 mfi.fabbox().smallEnd(1), mfi.fabbox().bigEnd(1)+1,
+                                 mfi.fabbox().smallEnd(2), mfi.fabbox().bigEnd(2)+1);
+
+          // mark ghost cells
+          vtkNew<vtkUnsignedCharArray> ghostCells;
+          ghostCells->SetName(vtkDataSetAttributes::GhostArrayName());
+          ghostCells->SetNumberOfTuples(uniformGrid->GetNumberOfCells());
+          uniformGrid->GetCellData()->AddArray(ghostCells.GetPointer());
+          ghostCells->Fill(0);
+          BoxArray boxArray(mfi.fabbox());
+          // if (boxArray.size() != ghostCells->GetNumberOfTuples())
+          //   std::cerr << "----------------------Amr.cpp: don't know size of stuff fabbox " << mfi.fabbox().size() << " ba "
+          //             << boxArray.size() << " t " << ghostCells->GetNumberOfTuples()
+          //             << " validbox " <<  mfi.validbox().size() << std::endl;
+
+          //Box data_box = mfi.fabbox();
+          Real* data = mfab[mfi].dataPtr(0);
+          vtkNew<vtkDoubleArray> vtkdata;
+          vtkdata->SetNumberOfTuples(uniformGrid->GetNumberOfCells());
+          vtkdata->SetName("simdata");
+          for (vtkIdType i=0;i<uniformGrid->GetNumberOfCells();i++) {
+            vtkdata->SetValue(i, data[i]);
+          }
+          uniformGrid->GetCellData()->AddArray(vtkdata.GetPointer());
         // GlobalDataAdaptor->SetValidBlockExtent(mfi.index(),
         //                                        mfi.validbox().smallEnd(0), mfi.validbox().bigEnd(0),
         //                                        mfi.validbox().smallEnd(1), mfi.validbox().bigEnd(1),
@@ -3341,7 +3379,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
 
       // ---- pack up the ints
       Array<int> allInts;
-      int allIntsSize(0);
+      //int allIntsSize(0);
       int dt_level_Size(dt_level.size()), dt_min_Size(dt_min.size());
       int ref_ratio_Size(ref_ratio.size()), amr_level_Size(amr_level.size()), geom_Size(Geom().size());
       int state_plot_vars_Size(state_plot_vars.size()), derive_plot_vars_Size(derive_plot_vars.size());
@@ -3413,7 +3451,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
         allInts.push_back(plot_headerversion);
         allInts.push_back(checkpoint_headerversion);
 
-        allIntsSize = allInts.size();
+        //allIntsSize = allInts.size();
       }
 
       BoxLib::BroadcastArray(allInts, scsMyId, ioProcNumAll, scsComm);
@@ -3513,7 +3551,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
 
       // ---- pack up the Reals
       Array<Real> allReals;
-      int allRealsSize(0);
+      //int allRealsSize(0);
       if(scsMyId == ioProcNumSCS) {
         allReals.push_back(cumtime);
         allReals.push_back(start_time);
@@ -3525,7 +3563,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
         for(int i(0); i < dt_level.size(); ++i)   { allReals.push_back(dt_level[i]); }
         for(int i(0); i < dt_min.size(); ++i)     { allReals.push_back(dt_min[i]); }
 
-	allRealsSize = allReals.size();
+	//allRealsSize = allReals.size();
       }
 
       BoxLib::BroadcastArray(allReals, scsMyId, ioProcNumAll, scsComm);
@@ -3549,7 +3587,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
 
       // ---- pack up the bools
       Array<int> allBools;  // ---- just use ints here
-      int allBoolsSize(0);
+      //int allBoolsSize(0);
       if(scsMyId == ioProcNumSCS) {
         allBools.push_back(abort_on_stream_retry_failure);
         allBools.push_back(bUserStopRequest);
@@ -3575,7 +3613,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
         allBools.push_back(VisMF::GetUseSynchronousReads());
         allBools.push_back(VisMF::GetUseDynamicSetSelection());
 
-	allBoolsSize = allBools.size();
+	//allBoolsSize = allBools.size();
       }
 
       BoxLib::BroadcastArray(allBools, scsMyId, ioProcNumAll, scsComm);
@@ -3612,7 +3650,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
       // ---- pack up the strings
       Array<std::string> allStrings;
       Array<char> serialStrings;
-      int serialStringsSize(0);
+      //int serialStringsSize(0);
       if(scsMyId == ioProcNumSCS) {
         allStrings.push_back(regrid_grids_file);
         allStrings.push_back(initial_grids_file);
@@ -3636,7 +3674,7 @@ Amr::AddProcsToComp(int nSidecarProcs, int prevSidecarProcs) {
 	}
 
 	serialStrings = BoxLib::SerializeStringArray(allStrings);
-	serialStringsSize = serialStrings.size();
+	//serialStringsSize = serialStrings.size();
       }
 
       BoxLib::BroadcastArray(serialStrings, scsMyId, ioProcNumAll, scsComm);
