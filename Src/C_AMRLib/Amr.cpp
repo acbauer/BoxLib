@@ -52,6 +52,8 @@
 #endif
 
 #ifdef BL_USE_CATALYST
+#include <vtkAMRBox.h>
+#include <vtkAMRInformation.h> // maybe not necessary
 #include <vtkCellData.h>
 #include <vtkCommunicator.h>
 #include <vtkCPDataDescription.h>
@@ -60,9 +62,9 @@
 #include <vtkCPPythonScriptPipeline.h>
 #include <vtkDoubleArray.h>
 #include <vtkImageData.h>
-#include <vtkMultiBlockDataSet.h>
 #include <vtkMultiProcessController.h>
 #include <vtkNew.h>
+#include <vtkOverlappingAMR.h>
 #include <vtkUniformGrid.h>
 #include <vtkUnsignedCharArray.h>
 #include <vector>
@@ -3186,42 +3188,46 @@ Amr::computeInSitu()
       vtkMultiProcessController* controller = vtkMultiProcessController::GetGlobalController();
       int myRank = controller->GetLocalProcessId();
       int numProcs = controller->GetNumberOfProcesses();
-      std::vector<vtkIdType> numBlocks(numProcs*(finest_level+1)*2, 0);
-      for (int k(0); k <= finest_level; ++k) {
-        MultiFab& mfab = amr_level[k].get_new_data(0); // acbauer check on get_new_data(0) arg
-        int counter = 0;
-        for (MFIter mfi(mfab); mfi.isValid(); ++mfi)
-        {
-          counter++;
-        }
-        numBlocks[myRank*(finest_level+1)+k] = counter;
+      std::vector<int> numBlocks(finest_level+1);
+      for (int level=0; level <= finest_level; ++level) {
+        numBlocks[level] = amr_level[level].numGrids();
       }
-      // can do a scan here
-      controller->AllReduce(&numBlocks[0], &numBlocks[numProcs*(finest_level+1)], numProcs*(finest_level+1), vtkCommunicator::MAX_OP);
-      vtkNew<vtkMultiBlockDataSet> grid;
-      grid->SetNumberOfBlocks(finest_level+1);
-
+      vtkNew<vtkOverlappingAMR> grid;
+      grid->Initialize(finest_level+1, &numBlocks[0]);
+      grid->SetGridDescription(VTK_XYZ_GRID); // 3D grid
       // compute global bounding box
       const Box& domain = this->getLevel(0).Domain();
       const RealBox& probDomain = this->Geom(0).ProbDomain();
-      std::cerr << "PPPPPPPPPPPPPPPPPPPPPPP prob domain " << probDomain << " domain " << domain << std::endl;
       double coarseSpacing[3] = {0, 0, 0};
       for (int i=0;i<BL_SPACEDIM;i++) {
         coarseSpacing[i] = (probDomain.hi(i) - probDomain.lo(i)) / (domain.bigEnd(i) - domain.smallEnd(i) + 1);
       }
+      double globalOrigin[3] = {probDomain.lo(0), probDomain.lo(1), probDomain.lo(2)};
+      grid->SetOrigin(globalOrigin);
       for (int level=0; level <= finest_level; ++level) {
-        vtkNew<vtkMultiBlockDataSet> levelGrid;
-        int startBlockAtLevel = 0, totalBlocksAtLevel = 0;
-        for (int i=0;i<numProcs;i++) {
-          totalBlocksAtLevel += numBlocks[level+(i+numProcs)*(finest_level+1)];
-          if (i < myRank) {
-            startBlockAtLevel += numBlocks[level+(i+numProcs)*(finest_level+1)];
+        int numGridsAtLevel = amr_level[level].numGrids();
+        double spacing[3] = {coarseSpacing[0]/std::pow(2, level),
+                             coarseSpacing[1]/std::pow(2, level),
+                             coarseSpacing[2]/std::pow(2, level)}; // acbauer -- this could be pow(4,level+1) instead of 2 depending on refinement ratio
+        grid->GetAMRInfo()->SetSpacing(level, spacing);
+        grid->GetAMRInfo()->SetRefinementRatio(level, 2); // acbauer -- could be 4 also
+        for (int g=0;g<numGridsAtLevel;g++) {
+          int cellExtents[6];
+          for (int ce=0;ce<3;ce++) {
+            cellExtents[2*ce] = amr_level[level].boxArray()[g].smallEnd(ce);
+            cellExtents[2*ce+1] = amr_level[level].boxArray()[g].bigEnd(ce);
           }
+          vtkAMRBox vtkbox(cellExtents);
+          grid->GetAMRInfo()->SetAMRBox(level, g, vtkbox);
         }
-        std::cerr << myRank << " at level " << level << " has totalBlocksAtLevel " << totalBlocksAtLevel << " and start block " << startBlockAtLevel << std::endl;
-        grid->SetBlock(level, levelGrid.GetPointer());
-        levelGrid->SetNumberOfBlocks(totalBlocksAtLevel);
+      }
+      // after the following we should have the blanking set up for when we add the grids later
+      grid->GenerateParentChildInformation();
+
+      for (int level=0; level <= finest_level; ++level) {
         MultiFab& mfab = amr_level[level].get_new_data(0); // acbauer check on get_new_data(0) arg
+        std::cerr << level << " PPPPPPPPPPPPPPPPPPPPPPP prob domain " << probDomain << " domain " << domain << " numgrids " << amr_level[level].numGrids() << std::endl;
+
         double spacing[3] = {coarseSpacing[0]/std::pow(2, level),
                              coarseSpacing[1]/std::pow(2, level),
                              coarseSpacing[2]/std::pow(2, level)}; // acbauer -- this could be pow(4,level+1) instead of 2 depending on refinement ratio
@@ -3230,8 +3236,7 @@ Amr::computeInSitu()
           std::cerr << "============================ Amr::computeInSitu() level " << level << " index " << mfi.index() << std::endl;
           vtkNew<vtkUniformGrid> uniformGrid;
 
-          levelGrid->SetBlock(mfi.index(), uniformGrid.GetPointer());
-          uniformGrid->SetSpacing(spacing);
+           uniformGrid->SetSpacing(spacing);
           uniformGrid->SetOrigin(0, 0, 0); // acbauer get the origin too...
           // BoxLib extents are with respect to cells and VTK extens are with respect to points
           // uniformGrid->SetExtent(mfi.validbox().smallEnd(0), mfi.validbox().bigEnd(0)+1,
@@ -3241,19 +3246,8 @@ Amr::computeInSitu()
                                  mfi.fabbox().smallEnd(1), mfi.fabbox().bigEnd(1)+1,
                                  mfi.fabbox().smallEnd(2), mfi.fabbox().bigEnd(2)+1);
 
-          // mark ghost cells
-          vtkNew<vtkUnsignedCharArray> ghostCells;
-          ghostCells->SetName(vtkDataSetAttributes::GhostArrayName());
-          ghostCells->SetNumberOfTuples(uniformGrid->GetNumberOfCells());
-          uniformGrid->GetCellData()->AddArray(ghostCells.GetPointer());
-          ghostCells->Fill(0);
-          BoxArray boxArray(mfi.fabbox());
-          // if (boxArray.size() != ghostCells->GetNumberOfTuples())
-          //   std::cerr << "----------------------Amr.cpp: don't know size of stuff fabbox " << mfi.fabbox().size() << " ba "
-          //             << boxArray.size() << " t " << ghostCells->GetNumberOfTuples()
-          //             << " validbox " <<  mfi.validbox().size() << std::endl;
-
-          //Box data_box = mfi.fabbox();
+          grid->SetDataSet(level, mfi.index(), uniformGrid.GetPointer());
+         //Box data_box = mfi.fabbox();
           Real* data = mfab[mfi].dataPtr(0);
           vtkNew<vtkDoubleArray> vtkdata;
           vtkdata->SetNumberOfTuples(uniformGrid->GetNumberOfCells());

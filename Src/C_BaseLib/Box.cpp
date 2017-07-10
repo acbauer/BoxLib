@@ -608,11 +608,11 @@ std::ostream&
 operator<< (std::ostream& os,
             const Box&    b)
 {
-    os << '('
-       << b.smallEnd() << ' '
-       << b.bigEnd()   << ' '
+    os << "Box.cpp("
+       << b.smallEnd() << " small "
+       << b.bigEnd()   << " big "
        << b.type()
-       << ')';
+       << " type)";
 
     if (os.fail())
         BoxLib::Error("operator<<(ostream&,Box&) failed");
